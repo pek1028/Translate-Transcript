@@ -27,15 +27,13 @@ def extract_audio(video_path: str, audio_path: str):
 def transcribe_audio(audio_path: str) -> str:
     """Transcribe audio to text using Whisper."""
     try:
-        file_size = os.path.getsize(audio_path)
-        if file_size > 25 * 1024 * 1024:  # 25MB
-            raise HTTPException(status_code=400, detail="Audio file exceeds 25MB limit")
         with open(audio_path, "rb") as audio_file:
             transcript = client.audio.transcriptions.create(
                 model="whisper-1",
-                file=audio_file
+                file=audio_file,
+                response_format="verbose_json"
             )
-        return transcript.text
+        return transcript
     except Exception as e:
         raise Exception(f"Whisper API error: {e}")
 
@@ -98,21 +96,49 @@ def replace_audio(video_path: str, tamil_audio_path: str, output_path: str):
         tamil_audio.close()
     except Exception as e:
         raise Exception(f"MoviePy error: {e}")
+    
+def add_subtitle(video_path: str, subtitle_video_path: str, transcript: dict, font: str = "Arial-Unicode-MS"):
+    """Add subtitles in the video."""
+    clip = mp.VideoFileClip(video_path)
+    subs = []
 
+    for segment in transcript.get("segments", []):
+        text = segment["text"].strip()
+        start = segment["start"]
+        end = segment["end"]
+
+        subtitle = (mp.TextClip(
+                        text,
+                        fontsize=36,
+                        font=font,
+                        color='white',
+                        stroke_color='black',
+                        stroke_width=1.5)
+                    .set_position(('center', 'bottom'))
+                    .set_start(start)
+                    .set_end(end))
+        
+        subs.append(subtitle)
+
+    final = mp.CompositeVideoClip([clip, *subs])
+    final.write_videofile(subtitle_video_path, codec="libx264", audio_codec="aac")
+
+    print(f"Subtitled video saved at {subtitle_video_path}")
+
+    
 @app.post("/translate-video")
 async def translate_video(file: UploadFile = File(...)):
     """
     Upload a video, translate its audio to Tamil with a news-style tone,
     and return the translated video and news script.
     """
-    # Validate file type
+    # Validation
     if not file.filename.lower().endswith(".mp4"):
         raise HTTPException(status_code=400, detail="Only MP4 files are supported")
 
-    # Create temporary directory for processing
+    # Temporary directory for processing
     with tempfile.TemporaryDirectory() as temp_dir:
         try:
-            # Save uploaded video
             video_path = os.path.join(temp_dir, "input_video.mp4")
             with open(video_path, "wb") as f:
                 shutil.copyfileobj(file.file, f)
@@ -121,6 +147,7 @@ async def translate_video(file: UploadFile = File(...)):
             audio_path = os.path.join(temp_dir, "temp_audio.m4a")
             tamil_audio_path = os.path.join(temp_dir, "temp_tamil_audio.mp3")
             output_video_path = os.path.join(temp_dir, "output_tamil_video.mp4")
+            subtitled_video_path = os.path.join(temp_dir, "output_with_subtitles.mp4")
             news_script_path = os.path.join(temp_dir, "news_script_tamil.txt")
 
             print("Extracting audio...")
@@ -138,12 +165,15 @@ async def translate_video(file: UploadFile = File(...)):
             print("Generating Tamil audio...")
             generate_tamil_audio(tamil_text, tamil_audio_path)
 
-            print("Processing final video...")
+            print("Replacing audio...")
             replace_audio(video_path, tamil_audio_path, output_video_path)
+
+            print("Adding subtitles...")
+            add_subtitle(output_video_path, subtitled_video_path)
 
             return {
                 "video": FileResponse(
-                    output_video_path,
+                    subtitled_video_path,
                     media_type="video/mp4",
                     filename="output.mp4"
                 ),

@@ -24,7 +24,7 @@ def extract_audio(video_path: str, audio_path: str):
     except Exception as e:
         raise Exception(f"Audio extraction failed: {e}")
 
-def transcribe_audio(audio_path: str) -> str:
+def transcribe_audio(audio_path: str) -> dict:
     """Transcribe audio to text using Whisper."""
     try:
         with open(audio_path, "rb") as audio_file:
@@ -154,7 +154,8 @@ async def translate_video(file: UploadFile = File(...)):
             extract_audio(video_path, audio_path)
 
             print("Transcribing audio...")
-            original_text = transcribe_audio(audio_path)
+            transcript_dict = transcribe_audio(audio_path)
+            original_text = transcript_dict.get("text", "")
 
             print("Translating to Tamil...")
             tamil_text = translate_to_tamil(original_text)

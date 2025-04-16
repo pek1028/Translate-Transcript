@@ -1,16 +1,22 @@
 from gtts import gTTS
 from openai import OpenAI
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
 from pathlib import Path
 import moviepy as mp
+import numpy as np
 import os
+import gc
+import uuid
 import shutil
 import tempfile
 
 app = FastAPI()
 
-client = OpenAI(api_key="openai-api-key") # Need to replace
+client = OpenAI(api_key="") # Need to replace
+
+os.makedirs("static", exist_ok=True)
 
 def extract_audio(video_path: str, audio_path: str):
     """Extract audio from video and save as WAV."""
@@ -21,10 +27,11 @@ def extract_audio(video_path: str, audio_path: str):
             raise ValueError("Video has no audio")
         video.audio.write_audiofile(audio_path, codec='aac', bitrate='128k')
         video.close()
+        gc.collect()
     except Exception as e:
         raise Exception(f"Audio extraction failed: {e}")
 
-def transcribe_audio(audio_path: str) -> dict:
+def transcribe_audio(audio_path: str, return_dict: bool = False):
     """Transcribe audio to text using Whisper."""
     try:
         with open(audio_path, "rb") as audio_file:
@@ -33,7 +40,10 @@ def transcribe_audio(audio_path: str) -> dict:
                 file=audio_file,
                 response_format="verbose_json"
             )
-        return transcript
+        if return_dict:
+            return transcript
+        else:
+            return transcript.text
     except Exception as e:
         raise Exception(f"Whisper API error: {e}")
 
@@ -56,7 +66,7 @@ def translate_to_tamil(text: str) -> str:
                 {"role": "user", "content": prompt}
             ],
             max_tokens=1500, # token limit
-            temperature=0.5
+            temperature=0.5 # creativity
         )
         tamil_text = response.choices[0].message.content.strip()
         return tamil_text
@@ -68,7 +78,7 @@ def generate_news_script(tamil_text: str, output_path: str) -> str:
     try:
         news_script = (
             f"{tamil_text}\n\n"
-        ) # If needed opening and closing text will modify
+        ) # If needed opening and closing text will modify but will affect the timeline
         with open(output_path, "w", encoding="utf-8") as f:
             f.write(news_script)
         return news_script
@@ -86,45 +96,62 @@ def generate_tamil_audio(text: str, output_path: str):
 def replace_audio(video_path: str, tamil_audio_path: str, output_path: str):
     """Replace video audio with Tamil audio."""
     try:
-        video = mp.VideoFileClip(video_path)
-        tamil_audio = mp.AudioFileClip(tamil_audio_path)
-        if tamil_audio.duration > video.duration:
-            tamil_audio = tamil_audio.subclip(0, video.duration)
-        video = video.set_audio(tamil_audio)
-        video.write_videofile(output_path, codec="libx264", audio_codec="aac")
+        video = mp.video.io.VideoFileClip.VideoFileClip(video_path)
+        tamil_audio = mp.audio.io.AudioFileClip.AudioFileClip(tamil_audio_path)
+        
+        video.audio = tamil_audio
+        
+        video.write_videofile(
+            output_path,
+            codec="libx264",
+            audio_codec="aac",
+            bitrate="5000k"
+        )
+        
         video.close()
-        tamil_audio.close()
+        gc.collect()
+        if hasattr(tamil_audio, 'close'):
+            tamil_audio.close()
     except Exception as e:
         raise Exception(f"MoviePy error: {e}")
     
-def add_subtitle(video_path: str, subtitle_video_path: str, transcript: dict, font: str = "Arial-Unicode-MS"):
-    """Add subtitles in the video."""
-    clip = mp.VideoFileClip(video_path)
+# WIP
+"""def add_subtitle(video_path: str, subtitle_video_path: str, transcript, font_path: str):
+    clip = mp.video.io.VideoFileClip.VideoFileClip(video_path)
     subs = []
 
-    for segment in transcript.get("segments", []):
-        text = segment["text"].strip()
-        start = segment["start"]
-        end = segment["end"]
+    for segment in transcript.segments:
+        text = segment.text.strip()
+        start = segment.start
+        end = segment.end
+        duration = end - start
 
-        subtitle = (mp.TextClip(
-                        text,
-                        fontsize=36,
-                        font=font,
+        subtitle = (mp.video.VideoClip.TextClip(
+                        font=font_path,
+                        text=text,
+                        font_size=int(36),
                         color='white',
                         stroke_color='black',
-                        stroke_width=1.5)
-                    .set_position(('center', 'bottom'))
-                    .set_start(start)
-                    .set_end(end))
+                        stroke_width=int(1)
+                        ).get_frame(0)
+        )
         
-        subs.append(subtitle)
+        sub_clip = (mp.video.VideoClip.ImageClip(subtitle)
+                        .set_start(start)
+                        .set_duration(duration)
+                        .set_position(("center", "bottom"))
+        )
 
-    final = mp.CompositeVideoClip([clip, *subs])
+        subs.append(sub_clip)
+
+    final = mp.video.compositing.CompositeVideoClip.CompositeVideoClip([clip, *subs])
     final.write_videofile(subtitle_video_path, codec="libx264", audio_codec="aac")
 
-    print(f"Subtitled video saved at {subtitle_video_path}")
+    clip.close()
+    final.close()
+    gc.collect()
 
+    print(f"Subtitled video saved at {subtitle_video_path}")"""
     
 @app.post("/translate-video")
 async def translate_video(file: UploadFile = File(...)):
@@ -154,8 +181,7 @@ async def translate_video(file: UploadFile = File(...)):
             extract_audio(video_path, audio_path)
 
             print("Transcribing audio...")
-            transcript_dict = transcribe_audio(audio_path)
-            original_text = transcript_dict.get("text", "")
+            original_text = transcribe_audio(audio_path)
 
             print("Translating to Tamil...")
             tamil_text = translate_to_tamil(original_text)
@@ -169,30 +195,45 @@ async def translate_video(file: UploadFile = File(...)):
             print("Replacing audio...")
             replace_audio(video_path, tamil_audio_path, output_video_path)
 
-            print("Adding subtitles...")
-            add_subtitle(output_video_path, subtitled_video_path)
+            # WIP
+            """print("Adding subtitles...")
+            font_path = "fonts/Latha.ttf"
+            transcript = transcribe_audio(audio_path, return_dict=True)
+            add_subtitle(
+                video_path=output_video_path,
+                subtitle_video_path=subtitled_video_path,
+                transcript=transcript,
+                font_path=font_path
+            )"""
 
-            return {
-                "video": FileResponse(
-                    subtitled_video_path,
-                    media_type="video/mp4",
-                    filename="output.mp4"
-                ),
-                "script": FileResponse(
-                    news_script_path,
-                    media_type="text/plain",
-                    filename="script.txt"
-                )
-            }
+            uid = str(uuid.uuid4())
+            final_video_name = f"translated_{uid}.mp4"
+            final_video_path = os.path.join("static", final_video_name)
+            shutil.copyfile(output_video_path, final_video_path)
+
+            # Return download URL (user can GET from /download/video?filename=...)
+            return JSONResponse(content={
+                "download_url": f"/download/video?filename={final_video_name}"
+            })
 
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
         finally:
             await file.close()
 
-@app.get("/")
-async def root():
-    return {"message": "test"}
+@app.get("/download/video")
+def get_translated_video(filename: str):
+    video_path = os.path.join("static", filename)
+
+    if not os.path.exists(video_path):
+        raise HTTPException(status_code=404, detail="Video not found")
+
+    return FileResponse(
+        path=video_path,
+        media_type="video/mp4",
+        filename="translated_video.mp4"
+    )
+
 
 if __name__ == "__main__":
     import uvicorn
